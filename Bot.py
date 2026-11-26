@@ -1,53 +1,85 @@
 import os
 import random
 from fastapi import FastAPI, Request
-from pyrobale import Client
-from pyrobale.objects import Message, CallbackQuery, UpdatesTypes
+from baleRobot import AsyncBaleClient, parse_update
 
 app = FastAPI()
-bot = Client(os.environ["BALE_TOKEN"])
+client = AsyncBaleClient(os.environ["BALE_TOKEN"])
 
-CHOICES = {"rock": "🪨 سنگ", "paper": "📄 کاغذ", "scissors": "✂️ قیچی"}
+# نگاشت متن دکمه‌ها به کلیدهای داخلی بازی
+CHOICES = {
+    "🪨 سنگ": "rock",
+    "📄 کاغذ": "paper",
+    "✂️ قیچی": "scissors",
+}
+CHOICE_NAMES = {v: k for k, v in CHOICES.items()}  # برعکس: rock -> 🪨 سنگ
 
-def winner(user, bot_choice):
-    if user == bot_choice: return "مساوی شد! 🤝"
-    wins = {("rock","scissors"), ("paper","rock"), ("scissors","paper")}
-    return "تو بردی! 🎉" if (user, bot_choice) in wins else "من بردم! 🤖"
+def get_winner(user_choice: str, bot_choice: str) -> str:
+    """تعیین برنده بازی"""
+    if user_choice == bot_choice:
+        return "مساوی شد! 🤝"
+    wins = {("rock", "scissors"), ("paper", "rock"), ("scissors", "paper")}
+    if (user_choice, bot_choice) in wins:
+        return "تو بردی! 🎉"
+    return "من بردم! 🤖"
 
-# هندلر دستور /start
-@bot.on_command("start")
-async def start_handler(message: Message):
-    await message.reply(
-        "بازی سنگ کاغذ قیچی! انتخاب کن:",
-        reply_markup={
-            "inline_keyboard": [[
-                {"text": "🪨 سنگ", "callback_data": "rock"},
-                {"text": "📄 کاغذ", "callback_data": "paper"},
-                {"text": "✂️ قیچی", "callback_data": "scissors"},
-            ]]
-        }
-    )
+# --- ساخت کیبورد سفارشی پایین صفحه (Reply Keyboard) ---
+def get_main_keyboard():
+    """ساختار JSON کیبورد سفارشی برای ارسال به API بله"""
+    return {
+        "keyboard": [
+            [{"text": "🪨 سنگ"}, {"text": "📄 کاغذ"}, {"text": "✂️ قیچی"}]
+        ],
+        "resize_keyboard": True,       # اندازه دکمه‌ها متناسب با متن باشد
+        "one_time_keyboard": False,    # کیبورد بعد از انتخاب مخفی نشود
+    }
 
-# هندلر کلیک روی دکمه‌ها
-@bot.on_callback_query()
-async def callback_handler(cq: CallbackQuery):
-    user_choice = cq.data
-    bot_choice = random.choice(list(CHOICES.keys()))
-    result = winner(user_choice, bot_choice)
-    
-    await cq.answer()
-    await cq.message.reply(
-        f"تو: {CHOICES[user_choice]}\nمن: {CHOICES[bot_choice]}\n\n{result}"
-    )
-
-# نقطه اتصال Webhook برای Render
 @app.post("/webhook")
 async def webhook(request: Request):
-    update_data = await request.json()
-    # پردازش آپدیت با Pyrobale
-    update = bot.parse_update(update_data)
-    await bot.process_update(update)
-    return {"ok": True}
+    try:
+        update = parse_update(await request.json())
+        message = update.effective_message
+
+        if message is None or message.text is None:
+            return {"ok": True}
+
+        text = message.text.strip()
+
+        # --- دستور شروع ---
+        if text == "/start":
+            await client.send_message(
+                message.chat_id,
+                "به بازی سنگ کاغذ قیچی خوش آمدی! 🎮\n"
+                "یکی از دکمه‌های زیر را انتخاب کن:",
+                reply_markup=get_main_keyboard(),  # ارسال کیبورد سفارشی
+            )
+            return {"ok": True}
+
+        # --- تشخیص انتخاب کاربر از روی متن دکمه ---
+        if text in CHOICES:
+            user_choice = CHOICES[text]
+            bot_choice = random.choice(list(CHOICE_NAMES.keys()))
+            result = get_winner(user_choice, bot_choice)
+
+            await client.send_message(
+                message.chat_id,
+                f"تو: {text}\n"
+                f"من: {CHOICE_NAMES[bot_choice]}\n\n"
+                f"{result}",
+            )
+            return {"ok": True}
+
+        # --- پیام‌های ناشناخته ---
+        await client.send_message(
+            message.chat_id,
+            "لطفاً یکی از دکمه‌های پایین صفحه را انتخاب کن.",
+        )
+        return {"ok": True}
+
+    except Exception as e:
+        # لاگ کردن خطا برای دیباگ (در لاگ‌های Render دیده می‌شود)
+        print(f"Error processing update: {e}")
+        return {"ok": True}
 
 @app.get("/")
 async def health():
